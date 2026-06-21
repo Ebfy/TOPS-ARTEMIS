@@ -1,0 +1,140 @@
+# ARTEMIS Hyperparameter Configuration — IEEE TDSC Revision
+# ===========================================================
+#
+# This file is the SINGLE SOURCE OF TRUTH for every hyperparameter.
+# All experiment scripts read from here.  No hyperparameter should
+# appear hard-coded in any other file.
+#
+# Fix history (vs CCS 2026 submission)
+# -------------------------------------
+# FIX-1  ODE tolerances: paper stated 1e-5; model.py used rtol=1e-4,atol=1e-5;
+#         HYPERPARAMETERS.md used rtol=1e-3,atol=1e-4.
+#         RESOLVED: rtol=1e-4, atol=1e-5  (best precision/speed tradeoff,
+#         validated on ETGraph task-1 — see Appendix A.2.3).
+#
+# FIX-2  MAML inner loop: previous _functional_forward() ignored adapted_params.
+#         RESOLVED: uses torch.func.functional_call (PyTorch >= 2.0).
+#
+# FIX-3  EWC lambda: paper Eq. 9 stated λ=1000; model.py used 5000.
+#         RESOLVED: λ=1000 throughout.
+#
+# FIX-4  Equation 1 notation: δ is perturbation to node FEATURE VECTOR x_v,
+#         not to discrete vertex ID v.  All PGD calls use feature-space δ.
+#
+# FIX-5  Data split: paper Section 6.1 stated 70/10/20; download_etgraph.py
+#         and EXPERIMENTS.md used 70/15/15.
+#         RESOLVED: 70/10/20 temporal split everywhere.
+#
+# Dataset notes
+# -------------
+# ETGraph  : 12.4 M Ethereum addresses, 23 847 confirmed phishing labels.
+# Elliptic : 203 769 Bitcoin transactions, 49 time steps.
+#            Both use 70/10/20 temporal split (FIX-5).
+
+# ─── Model architecture ───────────────────────────────────────────────────────
+model:
+  in_channels:      32       # node feature dim (ETGraph=16, Elliptic=166; overridden by loader)
+  hidden_channels:  128
+  num_classes:      2
+  num_heads:        4
+  dropout:          0.1
+  broadcast_hops:   3        # L3: number of multi-hop iterations
+  memory_size:      1000     # L2: priority-queue capacity
+  anomaly_weight:   1.0      # L2: weight on Mahalanobis anomaly score
+
+  # Innovation flags (all enabled by default; override for ablation)
+  use_ode:            true   # L1
+  use_anomaly_memory: true   # L2
+  use_multihop:       true   # L3
+  use_ewc:            true   # L5
+  use_certified:      true   # L6
+
+# ─── L1 Neural ODE  (FIX-1) ──────────────────────────────────────────────────
+ode:
+  method:      dopri5    # Dormand-Prince RK4(5); adjoint back-prop
+  rtol:        1.0e-4    # FIX-1: unified value (paper Appendix A.2.3)
+  atol:        1.0e-5    # FIX-1: unified value
+  stability_alpha: 0.1   # Lyapunov stability coefficient (Theorem 5.2)
+
+# ─── L2 Anomaly-Aware Memory ─────────────────────────────────────────────────
+memory:
+  size:         1000
+  temperature:  0.1      # attention softmax temperature
+  momentum:     0.01     # running-mean / cov update rate
+
+# ─── L3 Multi-Hop Broadcast ──────────────────────────────────────────────────
+broadcast:
+  hops:        3
+  aggregation: attention  # "attention" | "mean"
+
+# ─── L4 Adversarial Meta-Learning  (FIX-2) ───────────────────────────────────
+meta_learning:
+  inner_lr:           0.01
+  outer_lr:           0.001
+  inner_steps:        5
+  adversarial_ratio:  0.3   # fraction of tasks augmented with PGD
+  pgd_steps_inner:    10
+  pgd_epsilon_inner:  0.1
+
+# ─── L5 EWC  (FIX-3) ─────────────────────────────────────────────────────────
+ewc:
+  lambda:         1000    # FIX-3: corrected from erroneous 5000
+  fisher_samples: 1000    # number of samples for Fisher estimation
+  momentum:       0.5     # online Fisher update weight
+
+# ─── L6 Certified Adversarial Training ───────────────────────────────────────
+certified:
+  epsilon:        0.1     # ℓ_∞ perturbation budget (Eq. 10)
+  sigma:          0.25    # Gaussian smoothing std (Eq. 11-12)
+  n_samples:      100     # number of noise samples at train time
+  n_samples_eval: 1000    # number of noise samples at certification
+  alpha:          0.001   # Clopper-Pearson confidence level
+  pgd_steps:      20      # PGD attack steps during training
+  pgd_step_size:  0.025   # = epsilon / 4  (auto-computed if null)
+  adv_weight:     0.5     # weight of adversarial loss term
+
+# ─── Training ─────────────────────────────────────────────────────────────────
+training:
+  optimizer:         adamw
+  learning_rate:     1.0e-3
+  weight_decay:      1.0e-2
+  beta1:             0.9
+  beta2:             0.999
+  min_lr:            1.0e-6
+  clip_grad:         1.0
+  epochs:            100
+  patience:          15      # early-stopping patience
+  batch_size:        32
+  mixed_precision:   true
+  num_seeds:         5       # number of random seeds for reporting (Table 3)
+
+# ─── Data  (FIX-5) ────────────────────────────────────────────────────────────
+data:
+  etgraph_dir:   ./data/etgraph
+  elliptic_dir:  ./data/elliptic
+
+  # Split fractions — match paper Section 6.1 exactly (FIX-5)
+  train_frac:    0.70
+  val_frac:      0.10
+  test_frac:     0.20
+  # Note: 70/15/15 in the CCS scripts was an error; corrected to 70/10/20.
+
+  # ETGraph phishing label count (ground truth, Section 6.1) — FIX-4
+  etgraph_phishing_labels: 23847   # was 42847 in Appendix A (typo); 23847 is correct
+  # Source: ETGraph dataset README (xblock.pro/#/dataset/68)
+
+  # Elliptic label mapping
+  elliptic_illicit_class: 2   # maps to y=1 (positive)
+  elliptic_licit_class:   1   # maps to y=0 (negative)
+  elliptic_unknown_class: 3   # dropped from train/test
+
+# ─── Continual learning evaluation ───────────────────────────────────────────
+continual:
+  task_sequence: [1, 2, 3, 4, 5, 6]
+  ewc_lambda:    1000    # FIX-3: same as ewc.lambda above
+
+# ─── Outputs ─────────────────────────────────────────────────────────────────
+output:
+  results_dir: ./results
+  figures_dir: ./results/figures
+  models_dir:  ./results/checkpoints
